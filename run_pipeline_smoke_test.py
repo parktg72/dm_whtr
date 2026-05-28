@@ -29,6 +29,7 @@ def build_command_plan(python_executable: str | None = None, skip_analysis: bool
     steps = [
         SmokeStep("Generate synthetic SQLite database", [py, "generate_synthetic_db.py"]),
         SmokeStep("Build analytical cohort", [py, "build_cohort.py"]),
+        SmokeStep("Run full unittest discovery", [py, "-m", "unittest", "discover", "-v"]),
         SmokeStep(
             "Validate final cohort QA gate",
             [
@@ -40,7 +41,6 @@ def build_command_plan(python_executable: str | None = None, skip_analysis: bool
                 "data/cohort_analytical_lag1y.csv",
             ],
         ),
-        SmokeStep("Run full unittest discovery", [py, "-m", "unittest", "discover", "-v"]),
     ]
     if not skip_analysis:
         steps.append(SmokeStep("Run trajectory and Cox analysis", [py, "analyze_trajectories.py"]))
