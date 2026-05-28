@@ -1,0 +1,33 @@
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+venv/
+.venv/
+.venv_wsl/
+
+# Local agent/tool state
+.claude/
+.antigravitycli/
+
+# Generated synthetic/analysis data
+synthetic_nhis.db
+data/raw/
+data/*.csv
+data/plots/*.png
+logs/
+
+# Temporary wheel test downloads
+wheels_test/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
