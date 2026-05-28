@@ -75,10 +75,10 @@ python3 -m unittest test_analysis_pipeline.py
 # 전체 테스트 일괄 실행
 python3 -m unittest discover -v
 
-# 합성 DB → 코호트 → 최종 QA → 전체 테스트 → 분석까지 한 번에 실행
+# 합성 DB → 코호트 → 전체 테스트 → 최종 QA → 분석까지 한 번에 실행
 python3 run_pipeline_smoke_test.py
 
-# 빠른 환경 점검용: 분석 단계는 생략하고 최종 QA와 전체 테스트까지만 실행
+# 빠른 환경 점검용: 분석 단계는 생략하고 전체 테스트와 최종 QA까지만 실행
 python3 run_pipeline_smoke_test.py --skip-analysis
 ```
 모든 명령어가 **OK**로 끝나면, 폐쇄망 내부 시스템 설치가 완벽하게 성공한 것입니다.

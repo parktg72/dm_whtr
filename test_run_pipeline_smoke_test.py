@@ -29,8 +29,18 @@ class TestRunPipelineSmokeTest(unittest.TestCase):
     def test_build_command_plan_can_skip_analysis_for_fast_environment_checks(self):
         plan = run_pipeline_smoke_test.build_command_plan(python_executable="pythonX", skip_analysis=True)
         commands = [step.command for step in plan]
+        labels = [step.label for step in plan]
 
-        self.assertIn(["pythonX", "-m", "unittest", "discover", "-v"], commands)
+        self.assertEqual(labels, [
+            "Generate synthetic SQLite database",
+            "Build analytical cohort",
+            "Run full unittest discovery",
+            "Validate final cohort QA gate",
+        ])
+        self.assertLess(
+            commands.index(["pythonX", "-m", "unittest", "discover", "-v"]),
+            commands.index(["pythonX", "validate_cohort_output.py", "--cohort", "data/cohort_analytical.csv", "--lag1y", "data/cohort_analytical_lag1y.csv"]),
+        )
         self.assertNotIn(["pythonX", "analyze_trajectories.py"], commands)
 
 

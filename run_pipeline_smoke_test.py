@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """Run the DM_WHTR synthetic smoke pipeline as one reproducible command.
 
-The command intentionally places validate_cohort_output.py before survival
-analysis. If the final cohort QA gate fails, execution stops and downstream Cox
-analysis is not run.
+The command intentionally runs unittest discovery before the final
+validate_cohort_output.py gate because some tests regenerate cohort CSVs. The
+QA gate therefore checks the exact files consumed by downstream Cox analysis.
+If the final cohort QA gate fails, execution stops and analysis is not run.
 """
 
 from __future__ import annotations
@@ -59,12 +60,12 @@ def run_steps(steps: Sequence[SmokeStep], cwd: Path) -> None:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the DM_WHTR synthetic DB -> cohort -> QA -> tests -> analysis smoke pipeline."
+        description="Run the DM_WHTR synthetic DB -> cohort -> tests -> final QA -> analysis smoke pipeline."
     )
     parser.add_argument(
         "--skip-analysis",
         action="store_true",
-        help="Stop after DB/cohort generation, final cohort QA, and full unittest discovery.",
+        help="Stop after DB/cohort generation, full unittest discovery, and final cohort QA.",
     )
     parser.add_argument(
         "--python",
