@@ -66,6 +66,19 @@ def calculate_ols_slope(y_values, x_years):
 
 
 DIAGNOSIS_PRIMARY_ALIASES = ("ICD_CODE", "MCEX_SICK_SYM", "MCEX_SICK_SYM1")
+
+
+def _to_date_str(val):
+    """Convert date value to clean YYYYMMDD string. Handles float (20180101.0), str, NaT."""
+    if val is None:
+        return None
+    try:
+        if pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(val).replace('-', '').split('.')[0].strip()
+    return s if len(s) == 8 and s.isdigit() else None
 DIAGNOSIS_SECONDARY_ALIASES = tuple(f"MCEX_SICK_SYM{i}" for i in range(2, 8))
 DIAGNOSIS_ALL_ALIASES = DIAGNOSIS_PRIMARY_ALIASES + DIAGNOSIS_SECONDARY_ALIASES
 
@@ -268,8 +281,9 @@ def build_cohort_duckdb():
     med_dates_by_pid = {}
     for _, mrow in df_medication.iterrows():
         pid_m = mrow['INDI_DSCM_NO']
-        dt_m = str(mrow['MDCARE_STRT_DT']).replace('-', '')
-        med_dates_by_pid.setdefault(pid_m, set()).add(dt_m)
+        dt_m = _to_date_str(mrow['MDCARE_STRT_DT'])
+        if dt_m:
+            med_dates_by_pid.setdefault(pid_m, set()).add(dt_m)
 
     for pid in cohort_pids:
         # 개인별 검진 데이터 정렬
@@ -322,22 +336,21 @@ def build_cohort_duckdb():
         p_bill = df_billing[df_billing['INDI_DSCM_NO'] == pid]
         p_med_dates = med_dates_by_pid.get(pid, set())
 
-        # baseline FBS≥126 → T2DM 당뇨약 조건 대체 허용 여부
-        baseline_fbs = float(baseline_row['G1E_FBS']) if pd.notna(baseline_row.get('G1E_FBS')) else 0.0
-
         def get_disease_event_with_inpatient(p_events, p_bill, prefixes, require_inpatient=False):
-            # 대상 상병 조회
             matches = p_events[p_events.apply(lambda row: _row_has_diagnosis_prefix(row, prefixes), axis=1)]
             if len(matches) == 0:
                 return 0, max_days
 
             for _, row in matches.iterrows():
-                event_dt_str = str(row['MDCARE_STRT_DT']).replace('-', '')
+                event_dt_str = _to_date_str(row['MDCARE_STRT_DT'])
+                if not event_dt_str:
+                    continue
                 event_dt = datetime.strptime(event_dt_str, '%Y%m%d')
 
-                # 심뇌혈관 질환에 입원(MCARE_TP='1') 및 입내원일수(>=2일) 연동 검증 필터 적용
                 if require_inpatient:
-                    matching_bill = p_bill[p_bill['MDCARE_STRT_DT'].astype(str).str.replace('-', '') == event_dt_str]
+                    matching_bill = p_bill[
+                        p_bill['MDCARE_STRT_DT'].apply(_to_date_str) == event_dt_str
+                    ]
                     inpatient_valid = False
                     for _, b_row in matching_bill.iterrows():
                         mcare_tp = str(b_row['MCARE_TP']).strip()
@@ -353,26 +366,22 @@ def build_cohort_duckdb():
 
             return 0, max_days
 
-        def get_t2dm_event(p_events, p_med_dates, baseline_fbs):
-            """T2DM = E11 + (당뇨약 90일내 처방 OR baseline FBS≥126)."""
-            matches = p_events[p_events.apply(lambda row: _row_has_diagnosis_prefix(row, ['E11']), axis=1)]
+        def get_t2dm_event(p_events, p_med_dates):
+            """T2DM = E11 + 당뇨약(EFMDC_CLSF_NO=394) 90일 이내 처방 확인 (진단일 이후)."""
+            matches = p_events[p_events.apply(
+                lambda row: _row_has_diagnosis_prefix(row, ['E11']), axis=1
+            )].sort_values('MDCARE_STRT_DT')
             if len(matches) == 0:
                 return 0, max_days
 
-            fbs_confirmed = baseline_fbs >= 126.0
-
             for _, row in matches.iterrows():
-                event_dt_str = str(row['MDCARE_STRT_DT']).replace('-', '')
+                event_dt_str = _to_date_str(row['MDCARE_STRT_DT'])
+                if not event_dt_str:
+                    continue
                 event_dt = datetime.strptime(event_dt_str, '%Y%m%d')
-
-                if fbs_confirmed:
-                    survival_days = (event_dt - index_date).days
-                    return 1, min(max(0, survival_days), max_days)
-
-                # 당뇨약(EFMDC_CLSF_NO=394) 90일 이내 처방 확인
                 event_ord = event_dt.toordinal()
                 drug_confirmed = any(
-                    abs(event_ord - datetime.strptime(d, '%Y%m%d').toordinal()) <= 90
+                    0 <= datetime.strptime(d, '%Y%m%d').toordinal() - event_ord <= 90
                     for d in p_med_dates
                 )
                 if drug_confirmed:
@@ -384,15 +393,14 @@ def build_cohort_duckdb():
         # 질병별 이벤트 및 생존일 연산 (CVD & Stroke는 입원 2일 이상 조건 적용)
         event_cvd, time_cvd = get_disease_event_with_inpatient(p_events, p_bill, ['I20', 'I21', 'I22', 'I23', 'I24', 'I25'], require_inpatient=True)
         event_stroke, time_stroke = get_disease_event_with_inpatient(p_events, p_bill, ['I60', 'I61', 'I62', 'I63', 'I64', 'I65', 'I66', 'I67', 'I68', 'I69'], require_inpatient=True)
-        event_t2dm, time_t2dm = get_t2dm_event(p_events, p_med_dates, baseline_fbs)
+        event_t2dm, time_t2dm = get_t2dm_event(p_events, p_med_dates)
         event_ckd, time_ckd = get_disease_event_with_inpatient(p_events, p_bill, ['N18'], require_inpatient=False)
         
         # 사망 사건 연동에 따른 중도 절단(Censoring)
-        if pid in death_dict:
-            death_dt_str = str(death_dict[pid]).replace('-', '')
-            death_dt = datetime.strptime(death_dt_str, '%Y%m%d')
-            death_days = (death_dt - index_date).days
-            death_days = min(max(0, death_days), max_days)
+        _death_dt_str = _to_date_str(death_dict.get(pid))
+        if _death_dt_str:
+            death_dt = datetime.strptime(_death_dt_str, '%Y%m%d')
+            death_days = min(max(0, (death_dt - index_date).days), max_days)
             
             # 각 질병 발생 시점이 사망 시점보다 늦으면 이벤트를 무효화하고 사망일을 절단 시점으로 설정
             if event_cvd == 1 and time_cvd > death_days:
@@ -424,9 +432,7 @@ def build_cohort_duckdb():
             time_any = min([t for e, t in zip(events_list, times_list) if e == 1])
         else:
             event_any = 0
-            if pid in death_dict:
-                death_dt_str = str(death_dict[pid]).replace('-', '')
-                death_dt = datetime.strptime(death_dt_str, '%Y%m%d')
+            if _death_dt_str:
                 time_any = min(max(0, (death_dt - index_date).days), max_days)
             else:
                 time_any = max_days

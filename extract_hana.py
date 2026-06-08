@@ -406,8 +406,10 @@ def run_extraction_pipeline(conn):
         if df.empty:
             return
         duck.register("_tmp", df)
-        duck.execute(f"INSERT INTO {table} SELECT * FROM _tmp")
-        duck.unregister("_tmp")
+        try:
+            duck.execute(f"INSERT INTO {table} SELECT * FROM _tmp")
+        finally:
+            duck.unregister("_tmp")
 
     cursor = conn.cursor()
     
@@ -415,7 +417,6 @@ def run_extraction_pipeline(conn):
     # 1단계: 사망 데이터 추출 (전체 분석 기간 1회 일시 추출)
     # -------------------------------------------------------------
     print("\n[1단계] 사망 데이터(NHISBDA.HHDT_DEATH) 일시 추출에 진입합니다...")
-    death_file = os.path.join(death_dir, "death_all.csv")
     death_query = f"""
     SELECT 
         INDI_DSCM_NO,
@@ -459,7 +460,6 @@ def run_extraction_pipeline(conn):
             date_prefix = f"{year}{month:02d}"
             
             # A. 상병(Diagnosis - HBMT_TBGJME40) 추출
-            diag_file = os.path.join(diag_dir, f"diagnosis_{year}_{month:02d}.csv")
             diag_query = f"""
             SELECT
                 CMN_KEY,
@@ -472,7 +472,6 @@ def run_extraction_pipeline(conn):
             """
 
             # B. 일반명세(Billing - HBMT_TBGJME20) 추출
-            bill_file = os.path.join(billing_dir, f"billing_{year}_{month:02d}.csv")
             bill_query = f"""
             SELECT
                 CMN_KEY,
@@ -485,7 +484,6 @@ def run_extraction_pipeline(conn):
             """
 
             # C. 약물처방(Medication - HBMT_TBGJME30) 추출 — T2DM 당뇨약 확인용
-            med_file = os.path.join(medication_dir, f"medication_{year}_{month:02d}.csv")
             med_query = f"""
             SELECT
                 CMN_KEY,
