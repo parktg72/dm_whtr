@@ -116,27 +116,12 @@ def _row_has_diagnosis_prefix(row, prefixes):
     return any(code.startswith(prefix) for prefix in prefixes)
 
 
-def create_standardized_diagnosis_view(con, raw_dir):
-    con.execute(f"CREATE VIEW v_diagnosis_raw AS SELECT * FROM read_csv_auto('{raw_dir}/diagnosis/diagnosis_*.csv')")
-    column_rows = con.execute("DESCRIBE v_diagnosis_raw").fetchall()
-    columns = [row[0] for row in column_rows]
-    upper_to_column = {column.upper(): column for column in columns}
-
-    primary_columns = [upper_to_column[name] for name in DIAGNOSIS_PRIMARY_ALIASES if name in upper_to_column]
-    if not primary_columns:
-        raise ValueError("diagnosis data must include ICD_CODE, MCEX_SICK_SYM, or MCEX_SICK_SYM1")
-    if 'ICD_CODE' in upper_to_column:
-        con.execute("CREATE VIEW v_diagnosis AS SELECT * FROM v_diagnosis_raw")
-        return
-
-    icd_expression = "COALESCE(" + ", ".join(
-        f"NULLIF(TRIM(CAST({column} AS VARCHAR)), '')" for column in primary_columns
-    ) + ")"
-
-    con.execute(f"""
+def create_standardized_diagnosis_view(con):
+    con.execute("""
         CREATE VIEW v_diagnosis AS
-        SELECT *, {icd_expression} AS ICD_CODE
-        FROM v_diagnosis_raw
+        SELECT *,
+               NULLIF(TRIM(CAST(MCEX_SICK_SYM AS VARCHAR)), '') AS ICD_CODE
+        FROM nhis.diagnosis
     """)
 
 
@@ -146,9 +131,9 @@ def build_cohort_duckdb():
     output_dir = os.path.join(script_dir, "data")
     
     # 0. 로컬 추출 원천 파일 존재 여부 검증
-    death_file = os.path.join(raw_dir, "death", "death_all.csv")
-    if not os.path.exists(death_file):
-        print(f"[x] 에러: 로컬 추출 데이터가 존재하지 않습니다: {raw_dir}")
+    duckdb_file = os.path.join(raw_dir, "nhis_raw.duckdb")
+    if not os.path.exists(duckdb_file):
+        print(f"[x] 에러: 로컬 추출 데이터가 존재하지 않습니다: {duckdb_file}")
         print("    먼저 'extract_hana.py'를 실행하여 HANA DB에서 데이터를 다운로드하십시오.")
         sys.exit(1)
 
@@ -162,19 +147,14 @@ def build_cohort_duckdb():
     con.execute("SET max_memory = '8GB'")
     con.execute("SET threads = 4")
 
-    # 2. 로컬 디렉터리 분할 CSV들의 Glob 뷰(View) 정의
-    print("  - 로컬 계층형 CSV 와일드카드 뷰 정의...")
-    con.execute(f"CREATE VIEW v_death AS SELECT * FROM read_csv_auto('{raw_dir}/death/death_all.csv')")
-    con.execute(f"CREATE VIEW v_elig_checkup AS SELECT * FROM read_csv_auto('{raw_dir}/eligibility_checkup/elig_checkup_*.csv')")
-    create_standardized_diagnosis_view(con, raw_dir)
-    con.execute(f"CREATE VIEW v_billing AS SELECT * FROM read_csv_auto('{raw_dir}/billing/billing_*.csv')")
-
-    med_pattern = f"{raw_dir}/medication/medication_*.csv"
-    import glob as _glob
-    if _glob.glob(med_pattern):
-        con.execute(f"CREATE VIEW v_medication AS SELECT * FROM read_csv_auto('{med_pattern}')")
-    else:
-        con.execute("CREATE VIEW v_medication AS SELECT NULL::INTEGER AS INDI_DSCM_NO, NULL::VARCHAR AS MDCARE_STRT_DT WHERE 1=0")
+    # 2. nhis_raw.duckdb 연결 및 뷰 정의
+    print("  - nhis_raw.duckdb 연결 및 테이블 뷰 바인딩...")
+    con.execute(f"ATTACH '{duckdb_file}' AS nhis (READ_ONLY)")
+    con.execute("CREATE VIEW v_death        AS SELECT * FROM nhis.death")
+    con.execute("CREATE VIEW v_elig_checkup AS SELECT * FROM nhis.eligibility_checkup")
+    con.execute("CREATE VIEW v_billing      AS SELECT * FROM nhis.billing")
+    con.execute("CREATE VIEW v_medication   AS SELECT * FROM nhis.medication")
+    create_standardized_diagnosis_view(con)
 
     # 3. DuckDB SQL 기반 코호트 대상자 및 기왕력자(Wash-out) 필터링
     print("[~] DuckDB 병렬 벡터화 쿼리를 이용해 코호트 대상자 필터링 구동 중...")

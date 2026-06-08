@@ -30,6 +30,8 @@ if sys.platform.startswith('win'):
     except AttributeError:
         pass
 
+import duckdb
+
 # 2. 폐쇄망 환경을 고려한 hdbcli 임포트 예외 처리
 try:
     from hdbcli import dbapi
@@ -367,17 +369,46 @@ def run_extraction_pipeline(conn):
         
     script_dir = os.path.dirname(os.path.abspath(__file__))
     raw_dir = os.path.join(script_dir, "data", "raw")
-    
-    # 로컬 계층형 디렉터리 생성
-    death_dir = os.path.join(raw_dir, "death")
-    elig_checkup_dir = os.path.join(raw_dir, "eligibility_checkup")
-    diag_dir = os.path.join(raw_dir, "diagnosis")
-    billing_dir = os.path.join(raw_dir, "billing")
-    medication_dir = os.path.join(raw_dir, "medication")
+    os.makedirs(raw_dir, exist_ok=True)
 
-    for d in [death_dir, elig_checkup_dir, diag_dir, billing_dir, medication_dir]:
-        os.makedirs(d, exist_ok=True)
-        
+    duckdb_file = os.path.join(raw_dir, "nhis_raw.duckdb")
+    duck = duckdb.connect(duckdb_file)
+
+    duck.execute("""
+        CREATE OR REPLACE TABLE death (
+            INDI_DSCM_NO BIGINT, DTH_ASSMD_DT VARCHAR)
+    """)
+    duck.execute("""
+        CREATE OR REPLACE TABLE eligibility_checkup (
+            INDI_DSCM_NO BIGINT, STD_YYYY VARCHAR, SEX_TYPE VARCHAR, BYEAR VARCHAR,
+            AGED INTEGER, BZ_YYYY VARCHAR, G1E_HGHT DOUBLE, G1E_WGHT DOUBLE,
+            G1E_BMI DOUBLE, G1E_WSTC DOUBLE, G1E_BP_SYS DOUBLE, G1E_BP_DIA DOUBLE,
+            G1E_FBS DOUBLE, G1E_TOT_CHOL DOUBLE, G1E_GFR DOUBLE,
+            SMK_CURR INTEGER, DRK_LEVEL INTEGER, PA_ACTIVE INTEGER)
+    """)
+    duck.execute("""
+        CREATE OR REPLACE TABLE diagnosis (
+            CMN_KEY VARCHAR, INDI_DSCM_NO BIGINT, MCEX_SICK_SYM VARCHAR,
+            SICK_CLSF_TYPE VARCHAR, MDCARE_STRT_DT VARCHAR)
+    """)
+    duck.execute("""
+        CREATE OR REPLACE TABLE billing (
+            CMN_KEY VARCHAR, INDI_DSCM_NO BIGINT, MCARE_TP VARCHAR,
+            HSPTZ_VSHSP_DD_CNT DOUBLE, MDCARE_STRT_DT VARCHAR)
+    """)
+    duck.execute("""
+        CREATE OR REPLACE TABLE medication (
+            CMN_KEY VARCHAR, INDI_DSCM_NO BIGINT, EFMDC_CLSF_NO VARCHAR,
+            MDCARE_STRT_DT VARCHAR)
+    """)
+
+    def _duck_insert(table, df):
+        if df.empty:
+            return
+        duck.register("_tmp", df)
+        duck.execute(f"INSERT INTO {table} SELECT * FROM _tmp")
+        duck.unregister("_tmp")
+
     cursor = conn.cursor()
     
     # -------------------------------------------------------------
@@ -395,29 +426,26 @@ def run_extraction_pipeline(conn):
     try:
         print(f"  [실행 쿼리]: SELECT FROM NHISBDA.HHDT_DEATH (기간: {start_year}~{end_year})")
         df_death = pd.read_sql(death_query, conn)
-        df_death.to_csv(death_file, index=False, encoding='utf-8-sig')
-        print(f"  [+] 성공: 사망 데이터 추출 완료 ({len(df_death):,}건) -> {death_file}")
+        _duck_insert("death", df_death)
+        print(f"  [+] 성공: 사망 데이터 추출 완료 ({len(df_death):,}건) -> nhis_raw.duckdb::death")
     except Exception as e:
         print(f"  [x] 에러: 사망 데이터 추출 실패 (또는 테이블 부재): {e}")
-        # 사망 데이터가 없는 연구 환경 대비 빈 파일 생성
-        pd.DataFrame(columns=["INDI_DSCM_NO", "DTH_ASSMD_DT"]).to_csv(death_file, index=False, encoding='utf-8-sig')
-        print("  [!] 경고: 빈 사망 데이터 스키마 파일을 로컬 하드에 생성하였습니다.")
+        print("  [!] 경고: 사망 테이블이 비어있는 상태로 진행합니다.")
 
     # -------------------------------------------------------------
     # 2단계: 자격 및 검진 데이터 추출 (연 단위 루프 추출)
     # -------------------------------------------------------------
     print("\n[2단계] 자격 & 검진 데이터(NHISBDA 스키마) 연 단위 분할 추출에 진입합니다...")
     for year in range(start_year, end_year + 1):
-        year_file = os.path.join(elig_checkup_dir, f"elig_checkup_{year}.csv")
         print(f"\n  [~] {year}년도 자격 & 검진 테이블 연동을 시도합니다...")
-        
+
         query = get_eligibility_checkup_query(year)
-        
+
         try:
             df_year = pd.read_sql(query, conn)
             df_year = harmonize_lifestyle(df_year, get_lifestyle_era(year))
-            df_year.to_csv(year_file, index=False, encoding='utf-8-sig')
-            print(f"    [+] 성공: {year}년도 자격 & 검진 다운로드 완료 ({len(df_year):,}건) -> {year_file}")
+            _duck_insert("eligibility_checkup", df_year)
+            print(f"    [+] 성공: {year}년도 자격 & 검진 완료 ({len(df_year):,}건) -> nhis_raw.duckdb::eligibility_checkup")
         except Exception as ey:
             print(f"    [x] 실패: {year}년도 테이블 누락 혹은 접근 거부: {ey}")
             continue
@@ -472,40 +500,33 @@ def run_extraction_pipeline(conn):
             # 상병 다운로드 구동
             try:
                 df_diag = pd.read_sql(diag_query, conn)
+                _duck_insert("diagnosis", df_diag)
                 if len(df_diag) > 0:
-                    df_diag.to_csv(diag_file, index=False, encoding='utf-8-sig')
-                    print(f"  [+] 상병 성공: {year}년 {month:02d}월 ({len(df_diag):,}건) -> {diag_file}")
-                else:
-                    pd.DataFrame(columns=["CMN_KEY", "INDI_DSCM_NO", "MCEX_SICK_SYM", "SICK_CLSF_TYPE", "MDCARE_STRT_DT"]).to_csv(diag_file, index=False, encoding='utf-8-sig')
+                    print(f"  [+] 상병: {year}년 {month:02d}월 ({len(df_diag):,}건)")
             except Exception as ed:
-                pd.DataFrame(columns=["CMN_KEY", "INDI_DSCM_NO", "MCEX_SICK_SYM", "SICK_CLSF_TYPE", "MDCARE_STRT_DT"]).to_csv(diag_file, index=False, encoding='utf-8-sig')
-                print(f"  [!] 상병 경고: {year}년 {month:02d}월 누락/접근불가 (빈 파일 대체)")
+                print(f"  [!] 상병 경고: {year}년 {month:02d}월 누락/접근불가: {ed}")
 
             # 일반명세 다운로드 구동
             try:
                 df_bill = pd.read_sql(bill_query, conn)
+                _duck_insert("billing", df_bill)
                 if len(df_bill) > 0:
-                    df_bill.to_csv(bill_file, index=False, encoding='utf-8-sig')
-                    print(f"  [+] 명세 성공: {year}년 {month:02d}월 ({len(df_bill):,}건) -> {bill_file}")
-                else:
-                    pd.DataFrame(columns=["CMN_KEY", "INDI_DSCM_NO", "MCARE_TP", "HSPTZ_VSHSP_DD_CNT", "MDCARE_STRT_DT"]).to_csv(bill_file, index=False, encoding='utf-8-sig')
+                    print(f"  [+] 명세: {year}년 {month:02d}월 ({len(df_bill):,}건)")
             except Exception as eb:
-                pd.DataFrame(columns=["CMN_KEY", "INDI_DSCM_NO", "MCARE_TP", "HSPTZ_VSHSP_DD_CNT", "MDCARE_STRT_DT"]).to_csv(bill_file, index=False, encoding='utf-8-sig')
-                print(f"  [!] 명세 경고: {year}년 {month:02d}월 누락/접근불가 (빈 파일 대체)")
+                print(f"  [!] 명세 경고: {year}년 {month:02d}월 누락/접근불가: {eb}")
 
             # 약물처방 다운로드 구동
             try:
                 df_med = pd.read_sql(med_query, conn)
+                _duck_insert("medication", df_med)
                 if len(df_med) > 0:
-                    df_med.to_csv(med_file, index=False, encoding='utf-8-sig')
-                    print(f"  [+] 약물 성공: {year}년 {month:02d}월 ({len(df_med):,}건) -> {med_file}")
-                else:
-                    pd.DataFrame(columns=["CMN_KEY", "INDI_DSCM_NO", "EFMDC_CLSF_NO", "MDCARE_STRT_DT"]).to_csv(med_file, index=False, encoding='utf-8-sig')
+                    print(f"  [+] 약물: {year}년 {month:02d}월 ({len(df_med):,}건)")
             except Exception as em:
-                pd.DataFrame(columns=["CMN_KEY", "INDI_DSCM_NO", "EFMDC_CLSF_NO", "MDCARE_STRT_DT"]).to_csv(med_file, index=False, encoding='utf-8-sig')
-                print(f"  [!] 약물 경고: {year}년 {month:02d}월 누락/접근불가 (빈 파일 대체)")
+                print(f"  [!] 약물 경고: {year}년 {month:02d}월 누락/접근불가: {em}")
 
     cursor.close()
+    duck.close()
+    print(f"\n[+] DuckDB 파일 저장 완료: {duckdb_file}")
     return True
 
 
