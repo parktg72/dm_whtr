@@ -63,11 +63,15 @@ def _numeric(series):
     return pd.to_numeric(series, errors="coerce")
 
 
+def _col(df, name):
+    return df.get(name, pd.Series(index=df.index, dtype="float"))
+
+
 def harmonize_lifestyle(df, era):
     """검진 문진 원천 컬럼을 분석 표준 생활습관 컬럼으로 정규화합니다."""
     out = df.copy()
 
-    if era in ("pre2018", "2018"):
+    if era == "pre2018":
         if "SMK_CURR" in out:
             smk_curr = _numeric(out["SMK_CURR"]).fillna(0).eq(1)
         else:
@@ -83,20 +87,24 @@ def harmonize_lifestyle(df, era):
             pa_active = _numeric(out["PA_ACTIVE"]).fillna(0).eq(1)
         else:
             pa_active = _numeric(out.get("Q_PA_FRQ", pd.Series(index=out.index, dtype="float"))).ge(3)
-    elif era == "post2019":
+    elif era == "2018":
         if "SMK_CURR" in out:
             smk_curr = _numeric(out["SMK_CURR"]).fillna(0).eq(1)
         else:
-            smk_now = _numeric(out.get("Q_SMK_NOW_YN", pd.Series(index=out.index, dtype="float")))
-            smk_curr = smk_now.eq(1)
+            smk_curr = _numeric(_col(out, "Q_SMK_YN")).eq(3)
 
         if "DRK_LEVEL" in out:
             drk_level = _numeric(out["DRK_LEVEL"]).fillna(0)
         else:
-            drk_per = _numeric(out.get("Q_DRK_PER", pd.Series(index=out.index, dtype="float")))
-            drk_freq = _numeric(out.get("Q_DRK_FRQ", pd.Series(index=out.index, dtype="float")))
+            drk_per = _numeric(_col(out, "Q_DRK_PER"))
+            drk_freq = _numeric(_col(out, "Q_DRK_FRQ"))
+            drk_weekly = np.where(
+                drk_per.fillna(0) == 0, 0.0,
+                np.where(drk_per == 1, drk_freq,
+                np.where(drk_per == 2, drk_freq / 4.33,
+                                       drk_freq / 52.18)))
             drk_level = np.select(
-                [drk_per.fillna(0).le(0), drk_freq >= 4, drk_freq >= 2, drk_per >= 1],
+                [drk_per.fillna(0).le(0), drk_weekly >= 4, drk_weekly >= 2, drk_per > 0],
                 [0, 2, 1, 1],
                 default=0,
             )
@@ -104,10 +112,49 @@ def harmonize_lifestyle(df, era):
         if "PA_ACTIVE" in out:
             pa_active = _numeric(out["PA_ACTIVE"]).fillna(0).eq(1)
         else:
-            pa_vd = _numeric(out.get("Q_PA_VD_FRQ", pd.Series(index=out.index, dtype="float")))
-            pa_md = _numeric(out.get("Q_PA_MD_FRQ", pd.Series(index=out.index, dtype="float")))
-            pa_musl = _numeric(out.get("Q_PA_MUSL_FRQ", pd.Series(index=out.index, dtype="float")))
-            pa_active = pa_vd.ge(3) | pa_md.ge(5) | pa_musl.ge(2)
+            pa_vd_frq = _numeric(_col(out, "Q_PA_VD_FRQ")).fillna(0)
+            pa_vd_min = (_numeric(_col(out, "Q_PA_VD_HRS")).fillna(0) * 60
+                         + _numeric(_col(out, "Q_PA_VD_MINS")).fillna(0))
+            pa_md_frq = _numeric(_col(out, "Q_PA_MD_FRQ")).fillna(0)
+            pa_md_min = (_numeric(_col(out, "Q_PA_MD_HRS")).fillna(0) * 60
+                         + _numeric(_col(out, "Q_PA_MD_MINS")).fillna(0))
+            pa_musl   = _numeric(_col(out, "Q_PA_MUSL_FRQ")).fillna(0)
+            met_weekly = pa_vd_frq * pa_vd_min * 8 + pa_md_frq * pa_md_min * 4
+            pa_active = met_weekly.ge(600) | pa_musl.ge(2)
+    elif era == "post2019":
+        if "SMK_CURR" in out:
+            smk_curr = _numeric(out["SMK_CURR"]).fillna(0).eq(1)
+        else:
+            smk_curr = _numeric(_col(out, "Q_SMK_NOW_YN")).eq(1)
+
+        if "DRK_LEVEL" in out:
+            drk_level = _numeric(out["DRK_LEVEL"]).fillna(0)
+        else:
+            drk_per = _numeric(_col(out, "Q_DRK_PER"))
+            drk_freq = _numeric(_col(out, "Q_DRK_FRQ"))
+            drk_weekly = np.where(
+                drk_per.fillna(0) == 0, 0.0,
+                np.where(drk_per == 1, drk_freq,
+                np.where(drk_per == 2, drk_freq / 4.33,
+                                       drk_freq / 52.18)))
+            drk_level = np.select(
+                [drk_per.fillna(0).le(0), drk_weekly >= 4, drk_weekly >= 2, drk_per > 0],
+                [0, 2, 1, 1],
+                default=0,
+            )
+
+        if "PA_ACTIVE" in out:
+            pa_active = _numeric(out["PA_ACTIVE"]).fillna(0).eq(1)
+        else:
+            pa_vd_frq = _numeric(_col(out, "Q_PA_VD_FRQ")).fillna(0)
+            pa_vd_min = (_numeric(_col(out, "Q_PA_VD_HRS")).fillna(0) * 60
+                         + _numeric(_col(out, "Q_PA_VD_MINS")).fillna(0))
+            pa_md_frq = _numeric(_col(out, "Q_PA_MD_FRQ")).fillna(0)
+            pa_md_min = (_numeric(_col(out, "Q_PA_MD_HRS")).fillna(0) * 60
+                         + _numeric(_col(out, "Q_PA_MD_MINS")).fillna(0))
+            pa_musl   = _numeric(_col(out, "Q_PA_MUSL_FRQ")).fillna(0)
+            met_weekly = pa_vd_frq * pa_vd_min * 8 + pa_md_frq * pa_md_min * 4
+            pa_active = met_weekly.ge(600) | pa_musl.ge(2)
     else:
         raise ValueError(f"unknown lifestyle era: {era}")
 
@@ -161,7 +208,7 @@ def get_eligibility_checkup_query(year):
 
     if year == 2018:
         return """
-            SELECT 
+            SELECT
                 P.INDI_DSCM_NO,
                 P.STD_YYYY,
                 P.SEX_TYPE,
@@ -179,11 +226,33 @@ def get_eligibility_checkup_query(year):
                 E.G1E_GFR,
                 CASE WHEN CAST(Q.Q_SMK_YN AS VARCHAR) = '3' THEN 1 ELSE 0 END AS SMK_CURR,
                 CASE
-                    WHEN CAST(Q.Q_DRK_FRQ_V0108 AS INTEGER) >= 4 THEN 2
-                    WHEN CAST(Q.Q_DRK_FRQ_V0108 AS INTEGER) >= 2 THEN 1
+                    WHEN COALESCE(CAST(Q.Q_DRK_PER AS INTEGER), 0) = 0 THEN 0
+                    WHEN (CASE CAST(Q.Q_DRK_PER AS INTEGER)
+                              WHEN 1 THEN CAST(Q.Q_DRK_FRQ AS DOUBLE)
+                              WHEN 2 THEN CAST(Q.Q_DRK_FRQ AS DOUBLE) / 4.33
+                              WHEN 3 THEN CAST(Q.Q_DRK_FRQ AS DOUBLE) / 52.18
+                              ELSE 0.0 END) >= 4.0 THEN 2
+                    WHEN (CASE CAST(Q.Q_DRK_PER AS INTEGER)
+                              WHEN 1 THEN CAST(Q.Q_DRK_FRQ AS DOUBLE)
+                              WHEN 2 THEN CAST(Q.Q_DRK_FRQ AS DOUBLE) / 4.33
+                              WHEN 3 THEN CAST(Q.Q_DRK_FRQ AS DOUBLE) / 52.18
+                              ELSE 0.0 END) >= 2.0 THEN 1
+                    WHEN Q.Q_DRK_PER IS NOT NULL THEN 1
                     ELSE 0
                 END AS DRK_LEVEL,
-                CASE WHEN CAST(Q.Q_PA_FRQ AS INTEGER) >= 3 THEN 1 ELSE 0 END AS PA_ACTIVE
+                CASE
+                    WHEN (
+                        COALESCE(CAST(Q.Q_PA_VD_FRQ  AS DOUBLE), 0) *
+                            (COALESCE(CAST(Q.Q_PA_VD_HRS  AS DOUBLE), 0) * 60
+                             + COALESCE(CAST(Q.Q_PA_VD_MINS AS DOUBLE), 0)) * 8
+                        +
+                        COALESCE(CAST(Q.Q_PA_MD_FRQ  AS DOUBLE), 0) *
+                            (COALESCE(CAST(Q.Q_PA_MD_HRS  AS DOUBLE), 0) * 60
+                             + COALESCE(CAST(Q.Q_PA_MD_MINS AS DOUBLE), 0)) * 4
+                    ) >= 600 THEN 1
+                    WHEN COALESCE(CAST(Q.Q_PA_MUSL_FRQ AS INTEGER), 0) >= 2 THEN 1
+                    ELSE 0
+                END AS PA_ACTIVE
             FROM NHISBDA.HHDV_DSES_YY P
             INNER JOIN NHISBDA.HMDT_G1E_RST_2018 E
                 ON P.INDI_DSCM_NO = E.INDI_DSCM_NO
@@ -216,16 +285,31 @@ def get_eligibility_checkup_query(year):
                 E.G1E_GFR,
                 CASE WHEN CAST(Q.Q_SMK_NOW_YN AS VARCHAR) IN ('1', 'Y', 'YES') THEN 1 ELSE 0 END AS SMK_CURR,
                 CASE
-                    WHEN CAST(Q.Q_DRK_PER AS VARCHAR) IN ('0', 'N', 'NO') THEN 0
-                    WHEN CAST(Q.Q_DRK_FRQ AS INTEGER) >= 4 THEN 2
-                    WHEN CAST(Q.Q_DRK_FRQ AS INTEGER) >= 2 THEN 1
+                    WHEN COALESCE(CAST(Q.Q_DRK_PER AS INTEGER), 0) = 0 THEN 0
+                    WHEN (CASE CAST(Q.Q_DRK_PER AS INTEGER)
+                              WHEN 1 THEN CAST(Q.Q_DRK_FRQ AS DOUBLE)
+                              WHEN 2 THEN CAST(Q.Q_DRK_FRQ AS DOUBLE) / 4.33
+                              WHEN 3 THEN CAST(Q.Q_DRK_FRQ AS DOUBLE) / 52.18
+                              ELSE 0.0 END) >= 4.0 THEN 2
+                    WHEN (CASE CAST(Q.Q_DRK_PER AS INTEGER)
+                              WHEN 1 THEN CAST(Q.Q_DRK_FRQ AS DOUBLE)
+                              WHEN 2 THEN CAST(Q.Q_DRK_FRQ AS DOUBLE) / 4.33
+                              WHEN 3 THEN CAST(Q.Q_DRK_FRQ AS DOUBLE) / 52.18
+                              ELSE 0.0 END) >= 2.0 THEN 1
                     WHEN Q.Q_DRK_PER IS NOT NULL THEN 1
                     ELSE 0
                 END AS DRK_LEVEL,
                 CASE
-                    WHEN CAST(Q.Q_PA_VD_FRQ AS INTEGER) >= 3 THEN 1
-                    WHEN CAST(Q.Q_PA_MD_FRQ AS INTEGER) >= 5 THEN 1
-                    WHEN CAST(Q.Q_PA_MUSL_FRQ AS INTEGER) >= 2 THEN 1
+                    WHEN (
+                        COALESCE(CAST(Q.Q_PA_VD_FRQ  AS DOUBLE), 0) *
+                            (COALESCE(CAST(Q.Q_PA_VD_HRS  AS DOUBLE), 0) * 60
+                             + COALESCE(CAST(Q.Q_PA_VD_MINS AS DOUBLE), 0)) * 8
+                        +
+                        COALESCE(CAST(Q.Q_PA_MD_FRQ  AS DOUBLE), 0) *
+                            (COALESCE(CAST(Q.Q_PA_MD_HRS  AS DOUBLE), 0) * 60
+                             + COALESCE(CAST(Q.Q_PA_MD_MINS AS DOUBLE), 0)) * 4
+                    ) >= 600 THEN 1
+                    WHEN COALESCE(CAST(Q.Q_PA_MUSL_FRQ AS INTEGER), 0) >= 2 THEN 1
                     ELSE 0
                 END AS PA_ACTIVE
             FROM NHISBDA.HHDV_DSES_YY P
@@ -289,8 +373,9 @@ def run_extraction_pipeline(conn):
     elig_checkup_dir = os.path.join(raw_dir, "eligibility_checkup")
     diag_dir = os.path.join(raw_dir, "diagnosis")
     billing_dir = os.path.join(raw_dir, "billing")
-    
-    for d in [death_dir, elig_checkup_dir, diag_dir, billing_dir]:
+    medication_dir = os.path.join(raw_dir, "medication")
+
+    for d in [death_dir, elig_checkup_dir, diag_dir, billing_dir, medication_dir]:
         os.makedirs(d, exist_ok=True)
         
     cursor = conn.cursor()
@@ -348,18 +433,20 @@ def run_extraction_pipeline(conn):
             # A. 상병(Diagnosis - HBMT_TBGJME40) 추출
             diag_file = os.path.join(diag_dir, f"diagnosis_{year}_{month:02d}.csv")
             diag_query = f"""
-            SELECT 
+            SELECT
+                CMN_KEY,
                 INDI_DSCM_NO,
                 MCEX_SICK_SYM,
+                SICK_CLSF_TYPE,
                 MDCARE_STRT_DT
             FROM NHISBASE.HBMT_TBGJME40
             WHERE MDCARE_STRT_DT LIKE '{date_prefix}%'
             """
-            
+
             # B. 일반명세(Billing - HBMT_TBGJME20) 추출
             bill_file = os.path.join(billing_dir, f"billing_{year}_{month:02d}.csv")
             bill_query = f"""
-            SELECT 
+            SELECT
                 CMN_KEY,
                 INDI_DSCM_NO,
                 MCARE_TP,
@@ -368,7 +455,20 @@ def run_extraction_pipeline(conn):
             FROM NHISBASE.HBMT_TBGJME20
             WHERE MDCARE_STRT_DT LIKE '{date_prefix}%'
             """
-            
+
+            # C. 약물처방(Medication - HBMT_TBGJME30) 추출 — T2DM 당뇨약 확인용
+            med_file = os.path.join(medication_dir, f"medication_{year}_{month:02d}.csv")
+            med_query = f"""
+            SELECT
+                CMN_KEY,
+                INDI_DSCM_NO,
+                EFMDC_CLSF_NO,
+                MDCARE_STRT_DT
+            FROM NHISBASE.HBMT_TBGJME30
+            WHERE MDCARE_STRT_DT LIKE '{date_prefix}%'
+              AND EFMDC_CLSF_NO = '394'
+            """
+
             # 상병 다운로드 구동
             try:
                 df_diag = pd.read_sql(diag_query, conn)
@@ -376,13 +476,11 @@ def run_extraction_pipeline(conn):
                     df_diag.to_csv(diag_file, index=False, encoding='utf-8-sig')
                     print(f"  [+] 상병 성공: {year}년 {month:02d}월 ({len(df_diag):,}건) -> {diag_file}")
                 else:
-                    # 데이터가 비어있어도 무결성 유지를 위해 빈 스키마 저장
-                    pd.DataFrame(columns=["INDI_DSCM_NO", "MCEX_SICK_SYM", "MDCARE_STRT_DT"]).to_csv(diag_file, index=False, encoding='utf-8-sig')
+                    pd.DataFrame(columns=["CMN_KEY", "INDI_DSCM_NO", "MCEX_SICK_SYM", "SICK_CLSF_TYPE", "MDCARE_STRT_DT"]).to_csv(diag_file, index=False, encoding='utf-8-sig')
             except Exception as ed:
-                # 테이블 누락 대비 빈 스키마 저장
-                pd.DataFrame(columns=["INDI_DSCM_NO", "MCEX_SICK_SYM", "MDCARE_STRT_DT"]).to_csv(diag_file, index=False, encoding='utf-8-sig')
+                pd.DataFrame(columns=["CMN_KEY", "INDI_DSCM_NO", "MCEX_SICK_SYM", "SICK_CLSF_TYPE", "MDCARE_STRT_DT"]).to_csv(diag_file, index=False, encoding='utf-8-sig')
                 print(f"  [!] 상병 경고: {year}년 {month:02d}월 누락/접근불가 (빈 파일 대체)")
-                
+
             # 일반명세 다운로드 구동
             try:
                 df_bill = pd.read_sql(bill_query, conn)
@@ -394,6 +492,18 @@ def run_extraction_pipeline(conn):
             except Exception as eb:
                 pd.DataFrame(columns=["CMN_KEY", "INDI_DSCM_NO", "MCARE_TP", "HSPTZ_VSHSP_DD_CNT", "MDCARE_STRT_DT"]).to_csv(bill_file, index=False, encoding='utf-8-sig')
                 print(f"  [!] 명세 경고: {year}년 {month:02d}월 누락/접근불가 (빈 파일 대체)")
+
+            # 약물처방 다운로드 구동
+            try:
+                df_med = pd.read_sql(med_query, conn)
+                if len(df_med) > 0:
+                    df_med.to_csv(med_file, index=False, encoding='utf-8-sig')
+                    print(f"  [+] 약물 성공: {year}년 {month:02d}월 ({len(df_med):,}건) -> {med_file}")
+                else:
+                    pd.DataFrame(columns=["CMN_KEY", "INDI_DSCM_NO", "EFMDC_CLSF_NO", "MDCARE_STRT_DT"]).to_csv(med_file, index=False, encoding='utf-8-sig')
+            except Exception as em:
+                pd.DataFrame(columns=["CMN_KEY", "INDI_DSCM_NO", "EFMDC_CLSF_NO", "MDCARE_STRT_DT"]).to_csv(med_file, index=False, encoding='utf-8-sig')
+                print(f"  [!] 약물 경고: {year}년 {month:02d}월 누락/접근불가 (빈 파일 대체)")
 
     cursor.close()
     return True

@@ -169,6 +169,13 @@ def build_cohort_duckdb():
     create_standardized_diagnosis_view(con, raw_dir)
     con.execute(f"CREATE VIEW v_billing AS SELECT * FROM read_csv_auto('{raw_dir}/billing/billing_*.csv')")
 
+    med_pattern = f"{raw_dir}/medication/medication_*.csv"
+    import glob as _glob
+    if _glob.glob(med_pattern):
+        con.execute(f"CREATE VIEW v_medication AS SELECT * FROM read_csv_auto('{med_pattern}')")
+    else:
+        con.execute("CREATE VIEW v_medication AS SELECT NULL::INTEGER AS INDI_DSCM_NO, NULL::VARCHAR AS MDCARE_STRT_DT WHERE 1=0")
+
     # 3. DuckDB SQL 기반 코호트 대상자 및 기왕력자(Wash-out) 필터링
     print("[~] DuckDB 병렬 벡터화 쿼리를 이용해 코호트 대상자 필터링 구동 중...")
     
@@ -248,6 +255,14 @@ def build_cohort_duckdb():
           AND REPLACE(CAST(MDCARE_STRT_DT AS VARCHAR), '-', '') >= '20130101'
           AND REPLACE(CAST(MDCARE_STRT_DT AS VARCHAR), '-', '') <= '20231231'
     """).df()
+
+    # 최종 코호트 대상자의 당뇨약 처방 기록 적재 (T2DM 복합 정의용, EFMDC_CLSF_NO='394')
+    df_medication = con.execute("""
+        SELECT INDI_DSCM_NO, MDCARE_STRT_DT FROM v_medication
+        WHERE INDI_DSCM_NO IN (SELECT INDI_DSCM_NO FROM t_final_cohort_pids)
+          AND REPLACE(CAST(MDCARE_STRT_DT AS VARCHAR), '-', '') >= '20130101'
+          AND REPLACE(CAST(MDCARE_STRT_DT AS VARCHAR), '-', '') <= '20231231'
+    """).df()
     
     # 사망 기록 적재
     df_death = con.execute("""
@@ -266,8 +281,15 @@ def build_cohort_duckdb():
     
     baseline_records = []
     
-    # 빠른 조회를 위해 사망 기록 딕셔너리화
+    # 빠른 조회를 위해 사망 기록 및 당뇨약 처방 딕셔너리화
     death_dict = dict(zip(df_death['INDI_DSCM_NO'], df_death['DTH_ASSMD_DT']))
+
+    # 당뇨약 처방일 집합: pid → set of YYYYMMDD strings
+    med_dates_by_pid = {}
+    for _, mrow in df_medication.iterrows():
+        pid_m = mrow['INDI_DSCM_NO']
+        dt_m = str(mrow['MDCARE_STRT_DT']).replace('-', '')
+        med_dates_by_pid.setdefault(pid_m, set()).add(dt_m)
 
     for pid in cohort_pids:
         # 개인별 검진 데이터 정렬
@@ -318,20 +340,23 @@ def build_cohort_duckdb():
         # 2013년 이후 질병 내역
         p_events = df_followup[df_followup['INDI_DSCM_NO'] == pid]
         p_bill = df_billing[df_billing['INDI_DSCM_NO'] == pid]
-        
+        p_med_dates = med_dates_by_pid.get(pid, set())
+
+        # baseline FBS≥126 → T2DM 당뇨약 조건 대체 허용 여부
+        baseline_fbs = float(baseline_row['G1E_FBS']) if pd.notna(baseline_row.get('G1E_FBS')) else 0.0
+
         def get_disease_event_with_inpatient(p_events, p_bill, prefixes, require_inpatient=False):
             # 대상 상병 조회
             matches = p_events[p_events.apply(lambda row: _row_has_diagnosis_prefix(row, prefixes), axis=1)]
             if len(matches) == 0:
                 return 0, max_days
-                
+
             for _, row in matches.iterrows():
                 event_dt_str = str(row['MDCARE_STRT_DT']).replace('-', '')
                 event_dt = datetime.strptime(event_dt_str, '%Y%m%d')
-                
+
                 # 심뇌혈관 질환에 입원(MCARE_TP='1') 및 입내원일수(>=2일) 연동 검증 필터 적용
                 if require_inpatient:
-                    # 요양개시일이 동일한 일반 명세서 연동
                     matching_bill = p_bill[p_bill['MDCARE_STRT_DT'].astype(str).str.replace('-', '') == event_dt_str]
                     inpatient_valid = False
                     for _, b_row in matching_bill.iterrows():
@@ -341,17 +366,45 @@ def build_cohort_duckdb():
                             inpatient_valid = True
                             break
                     if not inpatient_valid:
-                        continue # 입원 조건을 불충족하므로 다음 상병기록 검색
-                
+                        continue
+
                 survival_days = (event_dt - index_date).days
                 return 1, min(max(0, survival_days), max_days)
-                
+
+            return 0, max_days
+
+        def get_t2dm_event(p_events, p_med_dates, baseline_fbs):
+            """T2DM = E11 + (당뇨약 90일내 처방 OR baseline FBS≥126)."""
+            matches = p_events[p_events.apply(lambda row: _row_has_diagnosis_prefix(row, ['E11']), axis=1)]
+            if len(matches) == 0:
+                return 0, max_days
+
+            fbs_confirmed = baseline_fbs >= 126.0
+
+            for _, row in matches.iterrows():
+                event_dt_str = str(row['MDCARE_STRT_DT']).replace('-', '')
+                event_dt = datetime.strptime(event_dt_str, '%Y%m%d')
+
+                if fbs_confirmed:
+                    survival_days = (event_dt - index_date).days
+                    return 1, min(max(0, survival_days), max_days)
+
+                # 당뇨약(EFMDC_CLSF_NO=394) 90일 이내 처방 확인
+                event_ord = event_dt.toordinal()
+                drug_confirmed = any(
+                    abs(event_ord - datetime.strptime(d, '%Y%m%d').toordinal()) <= 90
+                    for d in p_med_dates
+                )
+                if drug_confirmed:
+                    survival_days = (event_dt - index_date).days
+                    return 1, min(max(0, survival_days), max_days)
+
             return 0, max_days
 
         # 질병별 이벤트 및 생존일 연산 (CVD & Stroke는 입원 2일 이상 조건 적용)
         event_cvd, time_cvd = get_disease_event_with_inpatient(p_events, p_bill, ['I20', 'I21', 'I22', 'I23', 'I24', 'I25'], require_inpatient=True)
         event_stroke, time_stroke = get_disease_event_with_inpatient(p_events, p_bill, ['I60', 'I61', 'I62', 'I63', 'I64', 'I65', 'I66', 'I67', 'I68', 'I69'], require_inpatient=True)
-        event_t2dm, time_t2dm = get_disease_event_with_inpatient(p_events, p_bill, ['E11'], require_inpatient=False)
+        event_t2dm, time_t2dm = get_t2dm_event(p_events, p_med_dates, baseline_fbs)
         event_ckd, time_ckd = get_disease_event_with_inpatient(p_events, p_bill, ['N18'], require_inpatient=False)
         
         # 사망 사건 연동에 따른 중도 절단(Censoring)

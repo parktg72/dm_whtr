@@ -538,26 +538,55 @@ class TestHanaExtractionCorrections(unittest.TestCase):
                 self.assertIn(output_col, query)
 
     def test_harmonize_lifestyle_pre2018_and_2018_domains_are_non_null(self):
-        """pre2018/2018 구형 문진 컬럼은 SMK_CURR, DRK_LEVEL, PA_ACTIVE 표준값으로 변환되어야 함"""
+        """pre2018/2018 문진 컬럼은 SMK_CURR, DRK_LEVEL, PA_ACTIVE 표준값으로 변환되어야 함"""
         extract_hana = _import_extract_hana_for_tests()
         harmonize = getattr(extract_hana, "harmonize_lifestyle", None)
         self.assertIsNotNone(harmonize, "extract_hana.harmonize_lifestyle(df, era)가 필요합니다")
-        df = pd.DataFrame([
+
+        # pre2018: G1EQ 통합 테이블 — Q_DRK_FRQ_V0108(주간일수 직접), Q_PA_FRQ(주간횟수)
+        df_pre = pd.DataFrame([
             {"STD_YYYY": "2017", "BZ_YYYY": "2017", "Q_SMK_YN": 3, "Q_DRK_FRQ_V0108": 5, "Q_PA_FRQ": 3},
             {"STD_YYYY": "2017", "BZ_YYYY": "2017", "Q_SMK_YN": 1, "Q_DRK_FRQ_V0108": 2, "Q_PA_FRQ": 1},
             {"STD_YYYY": "2017", "BZ_YYYY": "2017", "Q_SMK_YN": None, "Q_DRK_FRQ_V0108": None, "Q_PA_FRQ": None},
         ])
+        out_pre = harmonize(df_pre, "pre2018")
+        self.assertEqual(out_pre["SMK_CURR"].tolist(), [1, 0, 0])
+        self.assertEqual(out_pre["DRK_LEVEL"].tolist(), [2, 1, 0])
+        self.assertEqual(out_pre["PA_ACTIVE"].tolist(), [1, 0, 0])
+        self.assertFalse(out_pre[["SMK_CURR", "DRK_LEVEL", "PA_ACTIVE"]].isna().any().any())
 
-        for era in ["pre2018", "2018"]:
-            out = harmonize(df, era)
-            self.assertEqual(out["SMK_CURR"].tolist(), [1, 0, 0])
-            self.assertEqual(out["DRK_LEVEL"].tolist(), [2, 1, 0])
-            self.assertEqual(out["PA_ACTIVE"].tolist(), [1, 0, 0])
-            self.assertFalse(out[["SMK_CURR", "DRK_LEVEL", "PA_ACTIVE"]].isna().any().any())
-            self.assertTrue(set(out["SMK_CURR"]).issubset({0, 1}))
-            self.assertTrue(set(out["DRK_LEVEL"]).issubset({0, 1, 2}))
-            self.assertTrue(set(out["PA_ACTIVE"]).issubset({0, 1}))
-            self.assertTrue((out["BZ_YYYY"].astype(str) == out["STD_YYYY"].astype(str)).all())
+        # 2018: GQ_RST_2018 — Q_SMK_YN='3', Q_DRK_PER+Q_DRK_FRQ(주단위), Q_PA_VD/MD_FRQ+HRS/MINS
+        df_2018 = pd.DataFrame([
+            {
+                "STD_YYYY": "2018", "BZ_YYYY": "2018", "Q_SMK_YN": 3,
+                "Q_DRK_PER": 1, "Q_DRK_FRQ": 5,
+                "Q_PA_VD_FRQ": 3, "Q_PA_VD_HRS": 0, "Q_PA_VD_MINS": 30,
+                "Q_PA_MD_FRQ": 0, "Q_PA_MD_HRS": 0, "Q_PA_MD_MINS": 0,
+                "Q_PA_MUSL_FRQ": 0,
+            },
+            {
+                "STD_YYYY": "2018", "BZ_YYYY": "2018", "Q_SMK_YN": 1,
+                "Q_DRK_PER": 1, "Q_DRK_FRQ": 2,
+                "Q_PA_VD_FRQ": 0, "Q_PA_VD_HRS": 0, "Q_PA_VD_MINS": 0,
+                "Q_PA_MD_FRQ": 5, "Q_PA_MD_HRS": 0, "Q_PA_MD_MINS": 30,
+                "Q_PA_MUSL_FRQ": 0,
+            },
+            {
+                "STD_YYYY": "2018", "BZ_YYYY": "2018", "Q_SMK_YN": None,
+                "Q_DRK_PER": 0, "Q_DRK_FRQ": None,
+                "Q_PA_VD_FRQ": None, "Q_PA_VD_HRS": None, "Q_PA_VD_MINS": None,
+                "Q_PA_MD_FRQ": None, "Q_PA_MD_HRS": None, "Q_PA_MD_MINS": None,
+                "Q_PA_MUSL_FRQ": None,
+            },
+        ])
+        out_2018 = harmonize(df_2018, "2018")
+        self.assertEqual(out_2018["SMK_CURR"].tolist(), [1, 0, 0])
+        self.assertEqual(out_2018["DRK_LEVEL"].tolist(), [2, 1, 0])
+        self.assertEqual(out_2018["PA_ACTIVE"].tolist(), [1, 1, 0])
+        self.assertFalse(out_2018[["SMK_CURR", "DRK_LEVEL", "PA_ACTIVE"]].isna().any().any())
+        self.assertTrue(set(out_2018["SMK_CURR"]).issubset({0, 1}))
+        self.assertTrue(set(out_2018["DRK_LEVEL"]).issubset({0, 1, 2}))
+        self.assertTrue(set(out_2018["PA_ACTIVE"]).issubset({0, 1}))
 
     def test_harmonize_lifestyle_post2019_domains_are_non_null(self):
         """2019+ 신형 문진 컬럼은 실제 레이아웃명 기준으로 표준값을 산출해야 함"""
@@ -566,33 +595,27 @@ class TestHanaExtractionCorrections(unittest.TestCase):
         self.assertIsNotNone(harmonize, "extract_hana.harmonize_lifestyle(df, era)가 필요합니다")
         df = pd.DataFrame([
             {
-                "STD_YYYY": "2019",
-                "BZ_YYYY": "2019",
+                "STD_YYYY": "2019", "BZ_YYYY": "2019",
                 "Q_SMK_NOW_YN": 1,
-                "Q_DRK_PER": 1,
-                "Q_DRK_FRQ": 5,
-                "Q_PA_VD_FRQ": 3,
-                "Q_PA_MD_FRQ": 0,
+                "Q_DRK_PER": 1, "Q_DRK_FRQ": 5,
+                "Q_PA_VD_FRQ": 3, "Q_PA_VD_HRS": 0, "Q_PA_VD_MINS": 30,
+                "Q_PA_MD_FRQ": 0, "Q_PA_MD_HRS": 0, "Q_PA_MD_MINS": 0,
                 "Q_PA_MUSL_FRQ": 0,
             },
             {
-                "STD_YYYY": "2019",
-                "BZ_YYYY": "2019",
+                "STD_YYYY": "2019", "BZ_YYYY": "2019",
                 "Q_SMK_NOW_YN": 0,
-                "Q_DRK_PER": 1,
-                "Q_DRK_FRQ": 2,
-                "Q_PA_VD_FRQ": 0,
-                "Q_PA_MD_FRQ": 5,
+                "Q_DRK_PER": 1, "Q_DRK_FRQ": 2,
+                "Q_PA_VD_FRQ": 0, "Q_PA_VD_HRS": 0, "Q_PA_VD_MINS": 0,
+                "Q_PA_MD_FRQ": 5, "Q_PA_MD_HRS": 0, "Q_PA_MD_MINS": 30,
                 "Q_PA_MUSL_FRQ": 0,
             },
             {
-                "STD_YYYY": "2019",
-                "BZ_YYYY": "2019",
+                "STD_YYYY": "2019", "BZ_YYYY": "2019",
                 "Q_SMK_NOW_YN": None,
-                "Q_DRK_PER": 0,
-                "Q_DRK_FRQ": None,
-                "Q_PA_VD_FRQ": None,
-                "Q_PA_MD_FRQ": None,
+                "Q_DRK_PER": 0, "Q_DRK_FRQ": None,
+                "Q_PA_VD_FRQ": None, "Q_PA_VD_HRS": None, "Q_PA_VD_MINS": None,
+                "Q_PA_MD_FRQ": None, "Q_PA_MD_HRS": None, "Q_PA_MD_MINS": None,
                 "Q_PA_MUSL_FRQ": None,
             },
         ])
