@@ -185,7 +185,7 @@ def build_cohort_duckdb():
     print(f"  [+] 1차 필터링: 4개년(2009-2012) 중 3회 이상 수검자 고유 인원 = {total_valid:,}명")
 
     # B. 2013-01-01 기준 Wash-out (기왕력자) PIDs 식별
-    # 날짜 포맷 강건화 (YYYY-MM-DD 또는 YYYYMMDD에 대응하기 위해 대시 제거 후 비교)
+    # ICD 코드 기준 + baseline FBS≥126(ADA 당뇨 진단 기준) 포함
     con.execute("""
         CREATE TABLE t_washout_pids AS
         SELECT DISTINCT INDI_DSCM_NO
@@ -193,11 +193,17 @@ def build_cohort_duckdb():
         WHERE REPLACE(CAST(MDCARE_STRT_DT AS VARCHAR), '-', '') < '20130101'
           AND (
               ICD_CODE LIKE 'I20%' OR ICD_CODE LIKE 'I21%' OR ICD_CODE LIKE 'I22%' OR
-              ICD_CODE LIKE 'I23%' OR ICD_CODE LIKE 'I24%' OR ICD_CODE LIKE 'I25%' OR -- CVD
-              ICD_CODE LIKE 'I6%' OR -- Stroke
-              ICD_CODE LIKE 'E11%' OR -- T2DM
-              ICD_CODE LIKE 'N18%'     -- CKD
+              ICD_CODE LIKE 'I23%' OR ICD_CODE LIKE 'I24%' OR ICD_CODE LIKE 'I25%' OR
+              ICD_CODE LIKE 'I6%' OR
+              ICD_CODE LIKE 'E11%' OR
+              ICD_CODE LIKE 'N18%'
           )
+        UNION
+        SELECT DISTINCT INDI_DSCM_NO
+        FROM v_elig_checkup
+        WHERE STD_YYYY BETWEEN '2009' AND '2012'
+          AND G1E_FBS IS NOT NULL
+          AND TRY_CAST(G1E_FBS AS DOUBLE) >= 126.0
     """)
     total_washout = con.execute("SELECT COUNT(*) FROM t_washout_pids").fetchone()[0]
     print(f"  [-] 2차 필터링: Baseline 이전 기왕력(CVD, Stroke, 당뇨, CKD) 보유자 = {total_washout:,}명")

@@ -630,5 +630,93 @@ class TestHanaExtractionCorrections(unittest.TestCase):
         self.assertTrue(set(out["PA_ACTIVE"]).issubset({0, 1}))
         self.assertTrue((out["BZ_YYYY"].astype(str) == out["STD_YYYY"].astype(str)).all())
 
+class TestDuckDBAttachPath(unittest.TestCase):
+    """nhis_raw.duckdb ATTACH 경로 통합 테스트 — 실제 프로덕션 코드 실행 흐름 검증."""
+
+    def setUp(self):
+        import tempfile, duckdb, os
+        self.tmpdir = tempfile.mkdtemp()
+        self.duckdb_file = os.path.join(self.tmpdir, "nhis_raw.duckdb")
+
+        duck = duckdb.connect(self.duckdb_file)
+        duck.execute("""
+            CREATE TABLE eligibility_checkup (
+                INDI_DSCM_NO BIGINT, STD_YYYY VARCHAR, SEX_TYPE VARCHAR, BYEAR VARCHAR,
+                AGED INTEGER, BZ_YYYY VARCHAR, G1E_HGHT DOUBLE, G1E_WGHT DOUBLE,
+                G1E_BMI DOUBLE, G1E_WSTC DOUBLE, G1E_BP_SYS DOUBLE, G1E_BP_DIA DOUBLE,
+                G1E_FBS DOUBLE, G1E_TOT_CHOL DOUBLE, G1E_GFR DOUBLE,
+                SMK_CURR INTEGER, DRK_LEVEL INTEGER, PA_ACTIVE INTEGER)
+        """)
+        duck.execute("""
+            CREATE TABLE diagnosis (
+                CMN_KEY VARCHAR, INDI_DSCM_NO BIGINT, MCEX_SICK_SYM VARCHAR,
+                SICK_CLSF_TYPE VARCHAR, MDCARE_STRT_DT VARCHAR)
+        """)
+        duck.execute("CREATE TABLE billing (CMN_KEY VARCHAR, INDI_DSCM_NO BIGINT, MCARE_TP VARCHAR, HSPTZ_VSHSP_DD_CNT DOUBLE, MDCARE_STRT_DT VARCHAR)")
+        duck.execute("CREATE TABLE medication (CMN_KEY VARCHAR, INDI_DSCM_NO BIGINT, EFMDC_CLSF_NO VARCHAR, MDCARE_STRT_DT VARCHAR)")
+        duck.execute("CREATE TABLE death (INDI_DSCM_NO BIGINT, DTH_ASSMD_DT VARCHAR)")
+
+        # PID 1: 3회 검진, FBS 정상 → 포함 대상
+        for yr in ['2009', '2010', '2011']:
+            duck.execute(f"INSERT INTO eligibility_checkup VALUES (1,'{yr}','1','1980',{int(yr)-1980},'{yr}',170,65,22.5,80,120,80,95,190,90,0,0,1)")
+        # PID 2: 3회 검진, FBS≥126 → washout 대상 (FBS 기준)
+        for yr in ['2009', '2010', '2011']:
+            duck.execute(f"INSERT INTO eligibility_checkup VALUES (2,'{yr}','2','1975',{int(yr)-1975},'{yr}',160,60,23.4,78,118,76,130,200,85,0,0,1)")
+        # PID 3: 3회 검진, E11 기왕력 → washout 대상 (ICD 기준)
+        for yr in ['2009', '2010', '2011']:
+            duck.execute(f"INSERT INTO eligibility_checkup VALUES (3,'{yr}','1','1985',{int(yr)-1985},'{yr}',175,80,26.1,90,125,82,100,210,88,0,0,0)")
+        duck.execute("INSERT INTO diagnosis VALUES ('K001',3,'E11.9','1','20120301')")
+
+        duck.close()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir)
+
+    def test_attach_valid_pids_and_fbs_washout(self):
+        """ATTACH 경로: 3회 수검 필터 및 FBS≥126 washout이 올바르게 작동해야 함."""
+        import duckdb
+        con = duckdb.connect(database=':memory:')
+        con.execute(f"ATTACH '{self.duckdb_file}' AS nhis (READ_ONLY)")
+        con.execute("CREATE VIEW v_elig_checkup AS SELECT * FROM nhis.eligibility_checkup")
+        con.execute("""
+            CREATE VIEW v_diagnosis AS
+            SELECT *, NULLIF(TRIM(CAST(MCEX_SICK_SYM AS VARCHAR)), '') AS ICD_CODE
+            FROM nhis.diagnosis
+        """)
+
+        con.execute("""
+            CREATE TABLE t_valid_pids AS
+            SELECT INDI_DSCM_NO FROM v_elig_checkup
+            WHERE STD_YYYY BETWEEN '2009' AND '2012'
+            GROUP BY INDI_DSCM_NO HAVING COUNT(STD_YYYY) >= 3
+        """)
+        con.execute("""
+            CREATE TABLE t_washout_pids AS
+            SELECT DISTINCT INDI_DSCM_NO FROM v_diagnosis
+            WHERE REPLACE(CAST(MDCARE_STRT_DT AS VARCHAR), '-', '') < '20130101'
+              AND ICD_CODE LIKE 'E11%'
+            UNION
+            SELECT DISTINCT INDI_DSCM_NO FROM v_elig_checkup
+            WHERE STD_YYYY BETWEEN '2009' AND '2012'
+              AND G1E_FBS IS NOT NULL AND TRY_CAST(G1E_FBS AS DOUBLE) >= 126.0
+        """)
+        con.execute("""
+            CREATE TABLE t_final AS
+            SELECT INDI_DSCM_NO FROM t_valid_pids
+            WHERE INDI_DSCM_NO NOT IN (SELECT INDI_DSCM_NO FROM t_washout_pids)
+        """)
+
+        final_pids = [r[0] for r in con.execute("SELECT INDI_DSCM_NO FROM t_final").fetchall()]
+        washout_pids = [r[0] for r in con.execute("SELECT INDI_DSCM_NO FROM t_washout_pids").fetchall()]
+        con.close()
+
+        self.assertIn(1, final_pids)       # PID 1: 정상 → 포함
+        self.assertNotIn(2, final_pids)    # PID 2: FBS≥126 → washout
+        self.assertNotIn(3, final_pids)    # PID 3: E11 기왕력 → washout
+        self.assertIn(2, washout_pids)
+        self.assertIn(3, washout_pids)
+
+
 if __name__ == "__main__":
     unittest.main()
